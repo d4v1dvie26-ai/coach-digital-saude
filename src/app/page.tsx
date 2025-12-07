@@ -1,34 +1,168 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import Navbar from '@/components/custom/navbar';
 import MoodTracker from '@/components/custom/mood-tracker';
 import ProgressCard from '@/components/custom/progress-card';
 import { Target, Zap, TrendingUp, Award, Flame, Star, ArrowRight, Sparkles } from 'lucide-react';
 import Link from 'next/link';
+import { supabase } from '@/lib/supabase/client';
+import { getCurrentUser, getUserProfile } from '@/lib/supabase/auth';
+import { toast } from 'sonner';
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [currentMood, setCurrentMood] = useState<string>('good');
   const [showWelcome, setShowWelcome] = useState(true);
-
-  useEffect(() => {
-    // Verificar se onboarding foi completado
-    const onboardingCompleted = localStorage.getItem('onboardingCompleted');
-    if (!onboardingCompleted) {
-      window.location.href = '/onboarding';
-    }
-  }, []);
-
-  const stats = {
-    habitsCompleted: 5,
-    totalHabits: 8,
-    currentStreak: 7,
-    level: 5,
-    xp: 1250,
+  const [loading, setLoading] = useState(true);
+  const [profile, setProfile] = useState<any>(null);
+  const [stats, setStats] = useState({
+    habitsCompleted: 0,
+    totalHabits: 0,
+    currentStreak: 0,
+    level: 1,
+    xp: 0,
     nextLevelXp: 1500,
     energyLevel: 7,
-    weeklyProgress: 68,
+    weeklyProgress: 0,
+  });
+  const [tasks, setTasks] = useState<any[]>([]);
+
+  useEffect(() => {
+    loadUserData();
+  }, []);
+
+  const loadUserData = async () => {
+    try {
+      const user = await getCurrentUser();
+      if (!user) {
+        router.push('/auth/login');
+        return;
+      }
+
+      const userProfile = await getUserProfile(user.id);
+      setProfile(userProfile);
+
+      // Verificar se completou onboarding
+      if (!userProfile.onboarding_completed) {
+        router.push('/onboarding');
+        return;
+      }
+
+      // Carregar estatísticas
+      await loadStats(user.id);
+      await loadTasks(user.id);
+    } catch (error: any) {
+      console.error('Erro ao carregar dados:', error);
+      toast.error('Erro ao carregar dados do usuário');
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const loadStats = async (userId: string) => {
+    try {
+      // Carregar hábitos de hoje
+      const today = new Date().toISOString().split('T')[0];
+      const { data: habits } = await supabase
+        .from('habits')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('is_active', true);
+
+      const { data: completions } = await supabase
+        .from('habit_completions')
+        .select('*')
+        .eq('user_id', userId)
+        .gte('completed_at', `${today}T00:00:00`)
+        .lte('completed_at', `${today}T23:59:59`);
+
+      // Calcular progresso semanal
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      const { data: weekCompletions } = await supabase
+        .from('habit_completions')
+        .select('*')
+        .eq('user_id', userId)
+        .gte('completed_at', weekAgo.toISOString());
+
+      const weeklyProgress = habits && habits.length > 0
+        ? Math.round(((weekCompletions?.length || 0) / (habits.length * 7)) * 100)
+        : 0;
+
+      setStats({
+        habitsCompleted: completions?.length || 0,
+        totalHabits: habits?.length || 0,
+        currentStreak: profile?.current_streak || 0,
+        level: profile?.level || 1,
+        xp: profile?.xp || 0,
+        nextLevelXp: (profile?.level || 1) * 1500,
+        energyLevel: 7,
+        weeklyProgress,
+      });
+    } catch (error) {
+      console.error('Erro ao carregar estatísticas:', error);
+    }
+  };
+
+  const loadTasks = async (userId: string) => {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const { data } = await supabase
+        .from('daily_tasks')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('due_date', today)
+        .order('created_at', { ascending: true });
+
+      setTasks(data || []);
+    } catch (error) {
+      console.error('Erro ao carregar tarefas:', error);
+    }
+  };
+
+  const handleTaskToggle = async (taskId: string, completed: boolean) => {
+    try {
+      const { error } = await supabase
+        .from('daily_tasks')
+        .update({
+          completed: !completed,
+          completed_at: !completed ? new Date().toISOString() : null,
+        })
+        .eq('id', taskId);
+
+      if (error) throw error;
+
+      // Atualizar XP se completou
+      if (!completed && profile) {
+        const task = tasks.find((t) => t.id === taskId);
+        const newXp = profile.xp + (task?.xp_reward || 50);
+        await supabase
+          .from('profiles')
+          .update({ xp: newXp })
+          .eq('id', profile.id);
+
+        toast.success(`+${task?.xp_reward || 50} XP!`);
+      }
+
+      // Recarregar dados
+      loadUserData();
+    } catch (error: any) {
+      toast.error('Erro ao atualizar tarefa');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-teal-50 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-teal-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-gray-600 dark:text-gray-400">Carregando...</p>
+        </div>
+      </div>
+    );
+  }
 
   const recommendations = [
     {
@@ -67,7 +201,7 @@ export default function DashboardPage() {
                 <span className="text-sm font-medium">Bem-vindo de volta!</span>
               </div>
               <h1 className="text-3xl sm:text-4xl font-bold mb-2">
-                Olá, Usuário! 👋
+                Olá, {profile?.full_name || 'Usuário'}! 👋
               </h1>
               <p className="text-teal-100 mb-4">
                 Você está no nível {stats.level} com {stats.currentStreak} dias de sequência. Continue assim!
@@ -90,7 +224,7 @@ export default function DashboardPage() {
             subtitle="Continue assim!"
             icon={Target}
             gradient="from-teal-400 to-cyan-500"
-            progress={(stats.habitsCompleted / stats.totalHabits) * 100}
+            progress={stats.totalHabits > 0 ? (stats.habitsCompleted / stats.totalHabits) * 100 : 0}
             trend="up"
           />
           <ProgressCard
@@ -204,44 +338,46 @@ export default function DashboardPage() {
               <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
                 Tarefas de Hoje
               </h3>
-              <div className="space-y-3">
-                {[
-                  { title: 'Meditar 10 minutos', completed: true, xp: 50 },
-                  { title: 'Beber 2L de água', completed: true, xp: 30 },
-                  { title: 'Exercício físico 30min', completed: false, xp: 100 },
-                  { title: 'Ler 20 páginas', completed: false, xp: 75 },
-                ].map((task, index) => (
-                  <div
-                    key={index}
-                    className={`flex items-center justify-between p-4 rounded-lg border-2 transition-all ${
-                      task.completed
-                        ? 'bg-teal-50 dark:bg-teal-900/20 border-teal-200 dark:border-teal-800'
-                        : 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600 hover:border-teal-300 dark:hover:border-teal-700'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-3">
-                      <input
-                        type="checkbox"
-                        checked={task.completed}
-                        className="w-5 h-5 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
-                        readOnly
-                      />
-                      <span
-                        className={`font-medium ${
-                          task.completed
-                            ? 'text-gray-500 dark:text-gray-400 line-through'
-                            : 'text-gray-900 dark:text-gray-100'
-                        }`}
-                      >
-                        {task.title}
+              {tasks.length === 0 ? (
+                <p className="text-gray-500 dark:text-gray-400 text-center py-8">
+                  Nenhuma tarefa para hoje. Que tal criar algumas?
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {tasks.map((task) => (
+                    <div
+                      key={task.id}
+                      className={`flex items-center justify-between p-4 rounded-lg border-2 transition-all cursor-pointer ${
+                        task.completed
+                          ? 'bg-teal-50 dark:bg-teal-900/20 border-teal-200 dark:border-teal-800'
+                          : 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600 hover:border-teal-300 dark:hover:border-teal-700'
+                      }`}
+                      onClick={() => handleTaskToggle(task.id, task.completed)}
+                    >
+                      <div className="flex items-center space-x-3">
+                        <input
+                          type="checkbox"
+                          checked={task.completed}
+                          className="w-5 h-5 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                          readOnly
+                        />
+                        <span
+                          className={`font-medium ${
+                            task.completed
+                              ? 'text-gray-500 dark:text-gray-400 line-through'
+                              : 'text-gray-900 dark:text-gray-100'
+                          }`}
+                        >
+                          {task.title}
+                        </span>
+                      </div>
+                      <span className="text-xs font-bold text-teal-600 dark:text-teal-400">
+                        +{task.xp_reward} XP
                       </span>
                     </div>
-                    <span className="text-xs font-bold text-teal-600 dark:text-teal-400">
-                      +{task.xp} XP
-                    </span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Weekly Progress Chart */}
